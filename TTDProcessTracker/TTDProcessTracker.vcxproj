@@ -91,9 +91,11 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="FastMutex.cpp" />
     <ClCompile Include="TTDProcessTracker.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="FastMutex.h" />
     <ClInclude Include="TTDProcessTracker.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -22,9 +22,15 @@
     <ClCompile Include="TTDProcessTracker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="FastMutex.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TTDProcessTracker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FastMutex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
