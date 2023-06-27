@@ -6,8 +6,8 @@ Globals g_Globals;
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
 	UNREFERENCED_PARAMETER(RegistryPath);
 
-	InitializeListHead(&g_Globals.SuspendedPidsHead);
-	g_Globals.SuspendedPidsCount = 0;
+	InitializeListHead(&g_Globals.ItemsHead);
+	g_Globals.ItemsCount = 0;
 	g_Globals.TrackedPid = 0;
 	g_Globals.Mutex.Init();
 
@@ -15,6 +15,7 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 	DriverObject->MajorFunction[IRP_MJ_CREATE] = TTDProcessTrackerCreateClose;
 	DriverObject->MajorFunction[IRP_MJ_CLOSE] = TTDProcessTrackerCreateClose;
 	DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = TTDProcessTrackerDeviceControl;
+	DriverObject->MajorFunction[IRP_MJ_READ] = TTDProcessTrackerRead;
 
 	NTSTATUS status = STATUS_SUCCESS;
 
@@ -97,6 +98,53 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 	return status;
 }
 
+_Use_decl_annotations_
+NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	UNREFERENCED_PARAMETER(DeviceObject);
+
+	auto status = STATUS_SUCCESS;
+	auto stack = IoGetCurrentIrpStackLocation(Irp);
+	auto len = stack->Parameters.Read.Length;
+	auto count = 0;
+	NT_ASSERT(Irp->MdlAddress);
+
+	auto buffer = (PUCHAR)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+	if (!buffer) {
+		status = STATUS_INSUFFICIENT_RESOURCES;
+	}
+	else {
+		AutoLock<FastMutex> lock(g_Globals.Mutex);
+		for (;;) {
+			if (IsListEmpty(&g_Globals.ItemsHead))
+				break;
+
+			auto entry = RemoveHeadList(&g_Globals.ItemsHead);
+			auto item = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry);
+			ULONG size = sizeof(ULONG);
+			if (len < size) {
+				// Not enough room in the user's buffer.
+				InsertHeadList(&g_Globals.ItemsHead, entry);
+				break;
+			}
+
+			g_Globals.ItemsCount--;
+			::memcpy(buffer, &item->Data, size);
+			len -= size;
+			buffer += size;
+			count += size;
+
+			// free the item after copy
+			ExFreePool(item);
+		}
+	}
+
+	Irp->IoStatus.Status = status;
+	Irp->IoStatus.Information = count;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	return status;
+}
+
 void CreateProcessNotify(
 	_In_ HANDLE   ParentId,
 	_In_ HANDLE   ProcessId,
@@ -150,12 +198,12 @@ void CreateProcessNotify(
 
 NTSTATUS PushItem(LIST_ENTRY* Entry) {
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	if (g_Globals.SuspendedPidsCount >= MAX_SUSPENDED_PIDS) {
+	if (g_Globals.ItemsCount >= MAX_SUSPENDED_PIDS) {
 		KdPrint(("TTDPROCESSTRACKER PushItem: Suspended PIDs list is full\n"));
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
-	InsertTailList(&g_Globals.SuspendedPidsHead, Entry);
-	g_Globals.SuspendedPidsCount++;
+	InsertTailList(&g_Globals.ItemsHead, Entry);
+	g_Globals.ItemsCount++;
 	return STATUS_SUCCESS;
 }

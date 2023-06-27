@@ -12,14 +12,15 @@ struct FullItem {
 
 struct Globals {
 	ULONG TrackedPid;
-	LIST_ENTRY SuspendedPidsHead;
-	unsigned int SuspendedPidsCount;
+	LIST_ENTRY ItemsHead;
+	unsigned int ItemsCount;
 	FastMutex Mutex;
 };
 
 void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject);
 NTSTATUS TTDProcessTrackerCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+NTSTATUS TTDProcessTrackerRead(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 
 NTSTATUS PushItem(LIST_ENTRY* Entry);
 
