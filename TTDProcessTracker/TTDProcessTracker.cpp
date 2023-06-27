@@ -42,8 +42,14 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 
 _Use_decl_annotations_
 void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
-	UNICODE_STRING symName = SYMLINK_NAME;
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
+
+	while (!IsListEmpty(&g_Globals.ItemsHead)) {
+		auto entry = RemoveHeadList(&g_Globals.ItemsHead);
+		ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
+	}
+
+	UNICODE_STRING symName = SYMLINK_NAME;
 	IoDeleteDevice(DriverObject->DeviceObject);
 	IoDeleteSymbolicLink(&symName);
 }
