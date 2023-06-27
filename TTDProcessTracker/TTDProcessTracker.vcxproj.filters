@@ -33,5 +33,8 @@
     <ClInclude Include="FastMutex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ProcessTracker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

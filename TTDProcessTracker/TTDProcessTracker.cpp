@@ -1,21 +1,14 @@
 #include "TTDProcessTracker.h"
-#include <ntddk.h>
-#include "FastMutex.h"
-
-typedef struct Globals {
-	ULONG* TrackedPid;
-	FastMutex Mutex;
-} Globals;
-
-void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject);
-NTSTATUS TTDProcessTrackerCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
-NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+#include "ProcessTracker.h"
 
 Globals g_Globals;
 
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
 	UNREFERENCED_PARAMETER(RegistryPath);
 
+	InitializeListHead(&g_Globals.SuspendedPidsHead);
+	g_Globals.SuspendedPidsCount = 0;
+	g_Globals.TrackedPid = 0;
 	g_Globals.Mutex.Init();
 
 	DriverObject->DriverUnload = TTDProcessTrackerUnload;
@@ -42,16 +35,6 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 		return status;
 	}
 
-	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	g_Globals.TrackedPid = (ULONG*)ExAllocatePool2(PagedPool, sizeof(PID_DATA), 'TTD');
-	if (!g_Globals.TrackedPid) {
-		KdPrint(("Failed to allocate memory for TrackedPid\n"));
-		IoDeleteSymbolicLink(&symName);
-		IoDeleteDevice(DeviceObject);
-		return status;
-	}
-
-	*g_Globals.TrackedPid = 0;
 	KdPrint(("PriorityBooster loaded\n"));
 	return status;
 }
@@ -60,7 +43,6 @@ _Use_decl_annotations_
 void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 	UNICODE_STRING symName = SYMLINK_NAME;
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	ExFreePoolWithTag(g_Globals.TrackedPid, 'TTD');
 	IoDeleteDevice(DriverObject->DeviceObject);
 	IoDeleteSymbolicLink(&symName);
 }
@@ -95,50 +77,14 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 		}
 
 		// TODO VALID PID TEST HERE
-
-		*g_Globals.TrackedPid = pid_data->pid;
-		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", *g_Globals.TrackedPid));
+		g_Globals.TrackedPid = pid_data->pid;
+		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", g_Globals.TrackedPid));
 		break;
 	}
 
 	case IOCTL_TTDPROCESSTRACKER_STOP: {
-		*g_Globals.TrackedPid = 0;
+		g_Globals.TrackedPid = 0;
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP\n"));
-	}
-
-	case IOCTL_TTDPROCESSTRACKER_RESUME:
-	{
-		if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(PID_DATA)) {
-			return STATUS_BUFFER_TOO_SMALL;
-		}
-
-		PID_DATA* pid_data = (PID_DATA*)stack->Parameters.DeviceIoControl.Type3InputBuffer;
-		if (!pid_data) {
-			return STATUS_INVALID_PARAMETER;
-		}
-
-		CLIENT_ID client_id = { (HANDLE)pid_data->pid, 0 };
-		// TODO VALID PID TEST HERE
-
-		HANDLE handle;
-		OBJECT_ATTRIBUTES oa = { sizeof(oa) };
-		status = ZwOpenProcess(&handle, PROCESS_ALL_ACCESS, &oa, &client_id);
-		if (!NT_SUCCESS(status)) {
-			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to open process with PID: %d\n", *g_Globals.TrackedPid));
-			break;
-		}
-
-		// TODO GET THREADS OF PROCESS
-		// TODO RESUME THREADS
-
-		//ZwSuspendProcess(handle);
-
-		status = ZwClose(handle);
-		if (!NT_SUCCESS(status)) {
-			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to close process handle with PID: %d\n", *g_Globals.TrackedPid));
-			break;
-		}
-		break;
 	}
 
 	default:
@@ -158,16 +104,58 @@ void CreateProcessNotify(
 )
 {
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	if (*g_Globals.TrackedPid == 0) {
+	if (g_Globals.TrackedPid == 0) {
 		KdPrint(("Cannot track process, no PID set\n"));
 		return;
 	}
 
-	if (Create && HandleToUlong(ParentId) == *g_Globals.TrackedPid) {
+	if (Create && HandleToUlong(ParentId) == g_Globals.TrackedPid) {
 		KdPrint(("TTDPROCESSTRACKER CreateProcessNotify: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(ParentId)));
-		// TODO SUSPEND PROCESS
+		NTSTATUS status;
+
+		PEPROCESS process;
+		status = PsLookupProcessByProcessId(ParentId, &process);
+		if (!NT_SUCCESS(status)) {
+			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to open process with PID: %d\n", g_Globals.TrackedPid));
+			return;
+		}
+
+		typedef NTSTATUS(*PSSUSPENDPROCESS)(PEPROCESS p);
+		UNICODE_STRING temp = RTL_CONSTANT_STRING(L"PsSuspendProcess");
+		PSSUSPENDPROCESS PsSuspendProcess = (PSSUSPENDPROCESS)MmGetSystemRoutineAddress(&temp);
+		status = PsSuspendProcess(process);
+		if (!NT_SUCCESS(status)) {
+			KdPrint(("TTDPROCESSTRACKER CreateProcessNotify failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
+			return;
+		}
+
+		auto suspendedInfo = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
+		if (!suspendedInfo) {
+			KdPrint(("CreateProcessNotify: Failed to allocate memory for suspendedInfo\n"));
+			return;
+		}
+
+		suspendedInfo->Data = HandleToUlong(ProcessId);
+		status = PushItem(&suspendedInfo->Entry);
+		if (!NT_SUCCESS(status)) {
+			KdPrint(("TTDPROCESSTRACKER CreateProcessNotify failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
+			return;
+		}
+
+		KdPrint(("TTDPROCESSTRACKER CreateProcessNotify: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(ParentId)));
 	}
 
 	return;
 }
 
+NTSTATUS PushItem(LIST_ENTRY* Entry) {
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
+	if (g_Globals.SuspendedPidsCount >= MAX_SUSPENDED_PIDS) {
+		KdPrint(("TTDPROCESSTRACKER PushItem: Suspended PIDs list is full\n"));
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	InsertTailList(&g_Globals.SuspendedPidsHead, Entry);
+	g_Globals.SuspendedPidsCount++;
+	return STATUS_SUCCESS;
+}
