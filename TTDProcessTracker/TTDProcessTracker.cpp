@@ -1,8 +1,22 @@
 #include "TTDProcessTracker.h"
+#include <ntddk.h>
+#include "FastMutex.h"
+
+typedef struct Globals {
+	ULONG* TrackedPid;
+	FastMutex Mutex;
+} Globals;
+
+void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject);
+NTSTATUS TTDProcessTrackerCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+
+Globals g_Globals;
 
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
 	UNREFERENCED_PARAMETER(RegistryPath);
-	UNREFERENCED_PARAMETER(DriverObject);
+
+	g_Globals.Mutex.Init();
 
 	DriverObject->DriverUnload = TTDProcessTrackerUnload;
 	DriverObject->MajorFunction[IRP_MJ_CREATE] = TTDProcessTrackerCreateClose;
@@ -28,22 +42,25 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 		return status;
 	}
 
-	TrackedPid = (PHANDLE)ExAllocatePoolWithTag(PagedPool, sizeof(PID_DATA), 'TTD');
-	if (!TrackedPid) {
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
+	g_Globals.TrackedPid = (ULONG*)ExAllocatePool2(PagedPool, sizeof(PID_DATA), 'TTD');
+	if (!g_Globals.TrackedPid) {
 		KdPrint(("Failed to allocate memory for TrackedPid\n"));
 		IoDeleteSymbolicLink(&symName);
 		IoDeleteDevice(DeviceObject);
 		return status;
 	}
 
-	*TrackedPid = 0;
+	*g_Globals.TrackedPid = 0;
 	KdPrint(("PriorityBooster loaded\n"));
 	return status;
 }
 
+_Use_decl_annotations_
 void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 	UNICODE_STRING symName = SYMLINK_NAME;
-	ExFreePoolWithTag(TrackedPid, 'TTD');
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
+	ExFreePoolWithTag(g_Globals.TrackedPid, 'TTD');
 	IoDeleteDevice(DriverObject->DeviceObject);
 	IoDeleteSymbolicLink(&symName);
 }
@@ -64,6 +81,7 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 	auto stack = IoGetCurrentIrpStackLocation(Irp);
 	auto status = STATUS_SUCCESS;
 
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
 	switch (stack->Parameters.DeviceIoControl.IoControlCode) {
 	case IOCTL_TTDPROCESSTRACKER_INIT:
 	{
@@ -71,20 +89,20 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 			return STATUS_BUFFER_TOO_SMALL;
 		}
 
-		PPID_DATA pid_data = (PPID_DATA)stack->Parameters.DeviceIoControl.Type3InputBuffer;
+		PID_DATA* pid_data = (PID_DATA*)stack->Parameters.DeviceIoControl.Type3InputBuffer;
 		if (!pid_data) {
 			return STATUS_INVALID_PARAMETER;
 		}
 
 		// TODO VALID PID TEST HERE
 
-		*TrackedPid = (HANDLE)pid_data->pid;
-		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", (ULONG)*TrackedPid));
+		*g_Globals.TrackedPid = pid_data->pid;
+		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", *g_Globals.TrackedPid));
 		break;
 	}
 
 	case IOCTL_TTDPROCESSTRACKER_STOP: {
-		*TrackedPid = 0;
+		*g_Globals.TrackedPid = 0;
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP\n"));
 	}
 
@@ -94,7 +112,7 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 			return STATUS_BUFFER_TOO_SMALL;
 		}
 
-		PPID_DATA pid_data = (PPID_DATA)stack->Parameters.DeviceIoControl.Type3InputBuffer;
+		PID_DATA* pid_data = (PID_DATA*)stack->Parameters.DeviceIoControl.Type3InputBuffer;
 		if (!pid_data) {
 			return STATUS_INVALID_PARAMETER;
 		}
@@ -106,18 +124,18 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 		OBJECT_ATTRIBUTES oa = { sizeof(oa) };
 		status = ZwOpenProcess(&handle, PROCESS_ALL_ACCESS, &oa, &client_id);
 		if (!NT_SUCCESS(status)) {
-			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to open process with PID: %d\n", (ULONG)*TrackedPid));
+			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to open process with PID: %d\n", *g_Globals.TrackedPid));
 			break;
 		}
 
 		// TODO GET THREADS OF PROCESS
 		// TODO RESUME THREADS
 
-		ZwSuspendProcess(handle);
+		//ZwSuspendProcess(handle);
 
 		status = ZwClose(handle);
 		if (!NT_SUCCESS(status)) {
-			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to close process handle with PID: %d\n", (ULONG)*TrackedPid));
+			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to close process handle with PID: %d\n", *g_Globals.TrackedPid));
 			break;
 		}
 		break;
@@ -139,13 +157,14 @@ void CreateProcessNotify(
 	_In_ BOOLEAN  Create
 )
 {
-	if (*TrackedPid == 0) {
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
+	if (*g_Globals.TrackedPid == 0) {
 		KdPrint(("Cannot track process, no PID set\n"));
 		return;
 	}
 
-	if (Create && ParentId == *TrackedPid) {
-		KdPrint(("TTDPROCESSTRACKER CreateProcessNotify: Process %d with parent %d created\n", (ULONG)ProcessId, (ULONG)ParentId));
+	if (Create && HandleToUlong(ParentId) == *g_Globals.TrackedPid) {
+		KdPrint(("TTDPROCESSTRACKER CreateProcessNotify: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(ParentId)));
 		// TODO SUSPEND PROCESS
 	}
 

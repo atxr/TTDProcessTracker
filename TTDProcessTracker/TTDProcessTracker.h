@@ -1,5 +1,4 @@
 #pragma once
-#include <ntddk.h>
 
 #define IOCTL_TTDPROCESSTRACKER_INIT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_TTDPROCESSTRACKER_STOP CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -8,12 +7,6 @@
 #define DEVICE_NAME RTL_CONSTANT_STRING(L"\\Device\\TTDProcessTracker")
 #define SYMLINK_NAME RTL_CONSTANT_STRING(L"\\??\\TTDProcessTracker")
 
-typedef struct _PID_DATA {
-	HANDLE pid;
-} PID_DATA, * PPID_DATA;
-
-static PHANDLE TrackedPid = nullptr;
-
-void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject);
-NTSTATUS TTDProcessTrackerCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
-NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+struct PID_DATA {
+	unsigned long pid;
+};
