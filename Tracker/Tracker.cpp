@@ -20,7 +20,6 @@ BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
 		if (!success) {
 			return Error("Stop tracker failed");
 		}
-		CloseHandle(hDevice);
 		return TRUE;
 	}
 
@@ -36,7 +35,7 @@ int main(int argc, const char* argv[])
 		return 1;
 	}
 
-	hDevice = CreateFile(L"\\\\.\\TTDProcessTracker", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	hDevice = CreateFile(L"\\\\.\\TTDProcessTracker", GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	if (hDevice == INVALID_HANDLE_VALUE)
 		return Error("Failed to open device");
 
@@ -44,14 +43,28 @@ int main(int argc, const char* argv[])
 	PID_DATA data = { (unsigned long)atoi(argv[1]) };
 	BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_INIT, &data, sizeof(data), nullptr, 0, &returned, nullptr);
 	if (!success) {
-		return Error("Priority change failed");
+		return Error("Failed to init tracker");
 	}
 
+	ULONG buffer[64];
 	if (SetConsoleCtrlHandler(CtrlHandler, TRUE))
 	{
+		printf("Press CTRL+C to stop tracking\n");
 		for (;;) {
-			// TODO Check if a child process has been caught by the driver
-			// TODO If so, attach TTD and resume it
+			// Check if a child process has been caught by the driver
+			DWORD nb;
+			if (!::ReadFile(hDevice, buffer, sizeof(buffer), &returned, nullptr))
+				return Error("Failed to read from device");
+
+			if (returned != 0) {
+				printf("Driver suspended %d child process(es) with PID:\n", returned);
+				for (int i = 0; i < returned; i++) {
+					printf("- %d\n", buffer[i]);
+					// TODO If so, attach TTD and resume it
+				}
+			}
+
+			::Sleep(200);
 		}
 	}
 
