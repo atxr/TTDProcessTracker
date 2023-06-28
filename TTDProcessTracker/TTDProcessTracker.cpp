@@ -19,15 +19,16 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 
 	NTSTATUS status = STATUS_SUCCESS;
 
-	PDEVICE_OBJECT DeviceObject;
+	PDEVICE_OBJECT DeviceObject = nullptr;
 	UNICODE_STRING devName = DEVICE_NAME;
 	UNICODE_STRING symName = SYMLINK_NAME;
 
-	status = IoCreateDevice(DriverObject, 0, &devName, FILE_DEVICE_UNKNOWN, 0, FALSE, &DeviceObject);
+	status = IoCreateDevice(DriverObject, 0, &devName, FILE_DEVICE_UNKNOWN, 0, TRUE, &DeviceObject);
 	if (!NT_SUCCESS(status)) {
 		KdPrint(("Failed to create device object (0x%08X)\n", status));
 		return status;
 	}
+	DeviceObject->Flags |= DO_DIRECT_IO;
 
 	status = IoCreateSymbolicLink(&symName, &devName);
 	if (!NT_SUCCESS(status)) {
@@ -52,6 +53,8 @@ void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 	UNICODE_STRING symName = SYMLINK_NAME;
 	IoDeleteDevice(DriverObject->DeviceObject);
 	IoDeleteSymbolicLink(&symName);
+
+	KdPrint(("PriorityBooster unloaded\n"));
 }
 
 _Use_decl_annotations_
@@ -75,12 +78,14 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 	case IOCTL_TTDPROCESSTRACKER_INIT:
 	{
 		if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(PID_DATA)) {
-			return STATUS_BUFFER_TOO_SMALL;
+			status = STATUS_BUFFER_TOO_SMALL;
+			break;
 		}
 
 		PID_DATA* pid_data = (PID_DATA*)stack->Parameters.DeviceIoControl.Type3InputBuffer;
-		if (!pid_data) {
-			return STATUS_INVALID_PARAMETER;
+		if (pid_data == nullptr) {
+			status = STATUS_INVALID_PARAMETER;
+			break;
 		}
 
 		// TODO VALID PID TEST HERE
