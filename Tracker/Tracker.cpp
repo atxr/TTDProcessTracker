@@ -2,6 +2,8 @@
 #include <Windows.h>
 #include "../TTDProcessTracker/TTDProcessTracker.h"
 
+#define MAX_LENGTH 1024
+
 HANDLE hDevice;
 
 int Error(const char* message) {
@@ -28,10 +30,10 @@ BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
 	}
 }
 
-int main(int argc, const char* argv[])
+int wmain(int argc, const wchar_t* argv[])
 {
-	if (argc != 2) {
-		printf("Usage: tracker <PID to track>\n");
+	if (argc != 3) {
+		printf("Usage: tracker <PID to track> <out directory>\n");
 		return 1;
 	}
 
@@ -40,7 +42,8 @@ int main(int argc, const char* argv[])
 		return Error("Failed to open device");
 
 	DWORD returned;
-	PID_DATA data = { (unsigned long)atoi(argv[1]) };
+	wchar_t* end;
+	PID_DATA data = { wcstoul(argv[1], &end, 0) };
 	BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_INIT, &data, sizeof(data), nullptr, 0, &returned, nullptr);
 	if (!success) {
 		return Error("Failed to init tracker");
