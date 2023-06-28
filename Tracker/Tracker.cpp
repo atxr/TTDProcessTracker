@@ -59,8 +59,18 @@ int main(int argc, const char* argv[])
 			if (returned != 0) {
 				printf("Driver suspended %d child process(es) with PID:\n", returned);
 				for (int i = 0; i < returned; i++) {
+					/*
+							const wchar_t path[] = L"C:\\Program Files\\WindowsApps\\Microsoft.WinDbg_1.2306.12001.0_x64__8wekyb3d8bbwe\\amd64\\ttd\\TTD.exe";
+							wchar_t cmd[MAX_LENGTH];
+							const wchar_t out[] = L"out";
+							const wchar_t* arg[2] = { argv[2], argv[1] };
+							SHORT copied = _snwprintf(cmd, MAX_LENGTH, L"TTD.exe -out %s -attach %s -onInitComplete TtdInitCompleteEvent1480 1>path/to/temp/file 2>&1", argv[2], argv[1]);
+
+							STARTUPINFO si;
+							PROCESS_INFORMATION pi;
+							CreateProcessW(path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+					*/
 					printf("- %d\n", buffer[i]);
-					// TODO If so, attach TTD and resume it
 				}
 			}
 
