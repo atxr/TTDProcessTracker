@@ -37,6 +37,11 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 		return status;
 	}
 
+	status = PsSetCreateProcessNotifyRoutineEx(CreateProcessCallback, FALSE);
+	if (!NT_SUCCESS(status)) {
+		KdPrint(("TTDProcessTracker DriverEntry: Failed to register CreateProcessCallback (0x%08X)\n", status));
+	}
+
 	KdPrint(("PriorityBooster loaded\n"));
 	return status;
 }
@@ -49,6 +54,12 @@ void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 		auto entry = RemoveHeadList(&g_Globals.ItemsHead);
 		ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
 	}
+
+	NTSTATUS status = PsSetCreateProcessNotifyRoutineEx(CreateProcessCallback, TRUE);
+	if (!NT_SUCCESS(status)) {
+		KdPrint(("TTDProcessTrackerUnload: Failed to unregister CreateProcessCallback (0x%08X)\n", status));
+	}
+
 
 	UNICODE_STRING symName = SYMLINK_NAME;
 	IoDeleteDevice(DriverObject->DeviceObject);
@@ -77,12 +88,13 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 	switch (stack->Parameters.DeviceIoControl.IoControlCode) {
 	case IOCTL_TTDPROCESSTRACKER_INIT:
 	{
+		// FIXME right size?
 		if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(PID_DATA)) {
 			status = STATUS_BUFFER_TOO_SMALL;
 			break;
 		}
 
-		PID_DATA* pid_data = (PID_DATA*)stack->Parameters.DeviceIoControl.Type3InputBuffer;
+		PID_DATA* pid_data = (PID_DATA*)Irp->AssociatedIrp.SystemBuffer;
 		if (pid_data == nullptr) {
 			status = STATUS_INVALID_PARAMETER;
 			break;
@@ -156,52 +168,48 @@ NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	return status;
 }
 
-void CreateProcessNotify(
-	_In_ HANDLE   ParentId,
-	_In_ HANDLE   ProcessId,
-	_In_ BOOLEAN  Create
-)
+void CreateProcessCallback(
+	_Inout_ PEPROCESS Process,
+	_In_ HANDLE ProcessId,
+	_Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo)
 {
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	if (g_Globals.TrackedPid == 0) {
-		KdPrint(("Cannot track process, no PID set\n"));
+
+	// If we are not tracking a process, or if the process exits just return
+	if (g_Globals.TrackedPid == 0 || CreateInfo == nullptr) {
 		return;
 	}
 
-	if (Create && HandleToUlong(ParentId) == g_Globals.TrackedPid) {
-		KdPrint(("TTDPROCESSTRACKER CreateProcessNotify: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(ParentId)));
+	// If the process pid matches the one we are tracking
+	if (HandleToUlong(CreateInfo->ParentProcessId) == g_Globals.TrackedPid) {
+		KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 		NTSTATUS status;
 
-		PEPROCESS process;
-		status = PsLookupProcessByProcessId(ParentId, &process);
-		if (!NT_SUCCESS(status)) {
-			KdPrint(("IOCTL_TTDPROCESSTRACKER_RESUME failed to open process with PID: %d\n", g_Globals.TrackedPid));
-			return;
-		}
-
+		// Suspend the process
 		typedef NTSTATUS(*PSSUSPENDPROCESS)(PEPROCESS p);
 		UNICODE_STRING temp = RTL_CONSTANT_STRING(L"PsSuspendProcess");
 		PSSUSPENDPROCESS PsSuspendProcess = (PSSUSPENDPROCESS)MmGetSystemRoutineAddress(&temp);
-		status = PsSuspendProcess(process);
+		status = PsSuspendProcess(Process);
 		if (!NT_SUCCESS(status)) {
-			KdPrint(("TTDPROCESSTRACKER CreateProcessNotify failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
+			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
 			return;
 		}
 
+		// Push the process id to the notification list
 		auto suspendedInfo = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
 		if (!suspendedInfo) {
-			KdPrint(("CreateProcessNotify: Failed to allocate memory for suspendedInfo\n"));
+			KdPrint(("CreateProcessCallback: Failed to allocate memory for suspendedInfo\n"));
 			return;
 		}
 
 		suspendedInfo->Data = HandleToUlong(ProcessId);
 		status = PushItem(&suspendedInfo->Entry);
 		if (!NT_SUCCESS(status)) {
-			KdPrint(("TTDPROCESSTRACKER CreateProcessNotify failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
+			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
 			return;
 		}
 
-		KdPrint(("TTDPROCESSTRACKER CreateProcessNotify: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(ParentId)));
+		KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 	}
 
 	return;

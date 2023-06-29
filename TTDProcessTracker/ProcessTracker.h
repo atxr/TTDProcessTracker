@@ -23,4 +23,8 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 NTSTATUS TTDProcessTrackerRead(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 
 NTSTATUS PushItem(LIST_ENTRY* Entry);
+void CreateProcessCallback(
+	_Inout_ PEPROCESS Process,
+	_In_ HANDLE ProcessId,
+	_Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo);
 
