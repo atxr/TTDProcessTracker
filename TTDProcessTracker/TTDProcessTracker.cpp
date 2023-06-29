@@ -49,7 +49,6 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 _Use_decl_annotations_
 void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-
 	while (!IsListEmpty(&g_Globals.ItemsHead)) {
 		auto entry = RemoveHeadList(&g_Globals.ItemsHead);
 		ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
@@ -84,7 +83,6 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 	auto stack = IoGetCurrentIrpStackLocation(Irp);
 	auto status = STATUS_SUCCESS;
 
-	AutoLock<FastMutex> lock(g_Globals.Mutex);
 	switch (stack->Parameters.DeviceIoControl.IoControlCode) {
 	case IOCTL_TTDPROCESSTRACKER_INIT:
 	{
@@ -101,12 +99,14 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 		}
 
 		// TODO VALID PID TEST HERE
+		AutoLock<FastMutex> lock(g_Globals.Mutex);
 		g_Globals.TrackedPid = pid_data->pid;
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", g_Globals.TrackedPid));
 		break;
 	}
 
 	case IOCTL_TTDPROCESSTRACKER_STOP: {
+		AutoLock<FastMutex> lock(g_Globals.Mutex);
 		g_Globals.TrackedPid = 0;
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP\n"));
 	}
@@ -137,11 +137,11 @@ NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		status = STATUS_INSUFFICIENT_RESOURCES;
 	}
 	else {
-		AutoLock<FastMutex> lock(g_Globals.Mutex);
 		for (;;) {
 			if (IsListEmpty(&g_Globals.ItemsHead))
 				break;
 
+			AutoLock<FastMutex> lock(g_Globals.Mutex);
 			auto entry = RemoveHeadList(&g_Globals.ItemsHead);
 			auto item = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry);
 			ULONG size = sizeof(ULONG);
@@ -173,8 +173,6 @@ void CreateProcessCallback(
 	_In_ HANDLE ProcessId,
 	_Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo)
 {
-	AutoLock<FastMutex> lock(g_Globals.Mutex);
-
 	// If we are not tracking a process, or if the process exits just return
 	if (g_Globals.TrackedPid == 0 || CreateInfo == nullptr) {
 		return;
@@ -216,12 +214,12 @@ void CreateProcessCallback(
 }
 
 NTSTATUS PushItem(LIST_ENTRY* Entry) {
-	AutoLock<FastMutex> lock(g_Globals.Mutex);
 	if (g_Globals.ItemsCount >= MAX_SUSPENDED_PIDS) {
 		KdPrint(("TTDPROCESSTRACKER PushItem: Suspended PIDs list is full\n"));
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
 	InsertTailList(&g_Globals.ItemsHead, Entry);
 	g_Globals.ItemsCount++;
 	return STATUS_SUCCESS;
