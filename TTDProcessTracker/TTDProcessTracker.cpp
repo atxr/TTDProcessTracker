@@ -109,6 +109,7 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 		AutoLock<FastMutex> lock(g_Globals.Mutex);
 		g_Globals.TrackedPid = 0;
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP\n"));
+		break;
 	}
 
 	default:
