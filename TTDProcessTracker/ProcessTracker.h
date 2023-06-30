@@ -12,8 +12,8 @@ struct FullItem {
 
 struct Globals {
 	ULONG TrackedPid;
-	LIST_ENTRY ItemsHead;
-	unsigned int ItemsCount;
+	LIST_ENTRY SuspendedHead;
+	unsigned int SuspendedCount;
 	FastMutex Mutex;
 };
 

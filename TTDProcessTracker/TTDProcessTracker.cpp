@@ -6,8 +6,8 @@ Globals g_Globals;
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
 	UNREFERENCED_PARAMETER(RegistryPath);
 
-	InitializeListHead(&g_Globals.ItemsHead);
-	g_Globals.ItemsCount = 0;
+	InitializeListHead(&g_Globals.SuspendedHead);
+	g_Globals.SuspendedCount = 0;
 	g_Globals.TrackedPid = 0;
 	g_Globals.Mutex.Init();
 
@@ -49,8 +49,8 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 _Use_decl_annotations_
 void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	while (!IsListEmpty(&g_Globals.ItemsHead)) {
-		auto entry = RemoveHeadList(&g_Globals.ItemsHead);
+	while (!IsListEmpty(&g_Globals.SuspendedHead)) {
+		auto entry = RemoveHeadList(&g_Globals.SuspendedHead);
 		ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
 	}
 
@@ -139,20 +139,20 @@ NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	}
 	else {
 		for (;;) {
-			if (IsListEmpty(&g_Globals.ItemsHead))
+			if (IsListEmpty(&g_Globals.SuspendedHead))
 				break;
 
 			AutoLock<FastMutex> lock(g_Globals.Mutex);
-			auto entry = RemoveHeadList(&g_Globals.ItemsHead);
+			auto entry = RemoveHeadList(&g_Globals.SuspendedHead);
 			auto item = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry);
 			ULONG size = sizeof(ULONG);
 			if (len < size) {
 				// Not enough room in the user's buffer.
-				InsertHeadList(&g_Globals.ItemsHead, entry);
+				InsertHeadList(&g_Globals.SuspendedHead, entry);
 				break;
 			}
 
-			g_Globals.ItemsCount--;
+			g_Globals.SuspendedCount--;
 			::memcpy(buffer, &item->Data, size);
 			len -= size;
 			buffer += size;
@@ -215,13 +215,13 @@ void CreateProcessCallback(
 }
 
 NTSTATUS PushItem(LIST_ENTRY* Entry) {
-	if (g_Globals.ItemsCount >= MAX_SUSPENDED_PIDS) {
+	if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
 		KdPrint(("TTDPROCESSTRACKER PushItem: Suspended PIDs list is full\n"));
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	InsertTailList(&g_Globals.ItemsHead, Entry);
-	g_Globals.ItemsCount++;
+	InsertTailList(&g_Globals.SuspendedHead, Entry);
+	g_Globals.SuspendedCount++;
 	return STATUS_SUCCESS;
 }
