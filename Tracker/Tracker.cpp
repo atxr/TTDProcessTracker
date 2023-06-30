@@ -35,17 +35,18 @@ BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
 int wmain(int argc, const wchar_t* argv[])
 {
 	if (argc != 3) {
-		printf("Usage: tracker <PID to track> <out directory>\n");
+		printf("Usage: tracker <program to trace> <out directory>\n");
 		return 1;
 	}
+
+	DWORD current_pid = GetCurrentProcessId();
 
 	hDevice = CreateFile(L"\\\\.\\TTDProcessTracker", GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	if (hDevice == INVALID_HANDLE_VALUE)
 		return Error("Failed to open device");
 
 	DWORD tmp;
-	wchar_t* end;
-	PID_DATA data = { wcstoul(argv[1], &end, 0) };
+	PID_DATA data = { current_pid };
 	BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_INIT, &data, sizeof(data), nullptr, 0, &tmp, nullptr);
 	if (!success) {
 		return Error("Failed to init tracker");
@@ -77,38 +78,17 @@ int wmain(int argc, const wchar_t* argv[])
 			if (returned != 0) {
 				printf("Driver suspended %d child process(es) with PID:\n", returned);
 				for (int i = 0; i < returned; i++) {
-					ULONG child_pid = buffer[i];
-					if (count == 0) {
-						// Stop tracker
-						success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_STOP, nullptr, 0, nullptr, 0, &tmp, nullptr);
-						if (!success) {
-							return Error("Failed to stop tracker");
-						}
+					ULONG suspended_pid = buffer[i];
+					const wchar_t path[] = L"C:\\Program Files\\WindowsApps\\Microsoft.WinDbg_1.2306.12001.0_x64__8wekyb3d8bbwe\\amd64\\ttd\\TTD.exe";
+					wchar_t cmd[MAX_LENGTH];
+					const wchar_t* arg[2] = { argv[2], argv[1] };
+					SHORT copied = _snwprintf_s(cmd, MAX_LENGTH, L"TTD.exe -out %s -attach %s -onInitComplete TtdInitCompleteEvent1480 1>path/to/temp/file 2>&1", argv[2], argv[1]);
 
-						// Init tracker again with child PID
-						PID_DATA newdata = { child_pid };
-						success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_INIT, &newdata, sizeof(newdata), nullptr, 0, &tmp, nullptr);
-						if (!success) {
-							return Error("Failed to init tracker");
-						}
+					STARTUPINFO si;
+					PROCESS_INFORMATION pi;
+					CreateProcessW(path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
 
-						// Drop the other PIDs if any
-						i = returned;
-					}
-
-					else {
-						const wchar_t path[] = L"C:\\Program Files\\WindowsApps\\Microsoft.WinDbg_1.2306.12001.0_x64__8wekyb3d8bbwe\\amd64\\ttd\\TTD.exe";
-						wchar_t cmd[MAX_LENGTH];
-						const wchar_t out[] = L"out";
-						const wchar_t* arg[2] = { argv[2], argv[1] };
-						SHORT copied = _snwprintf_s(cmd, MAX_LENGTH, L"TTD.exe -out %s -attach %s -onInitComplete TtdInitCompleteEvent1480 1>path/to/temp/file 2>&1", argv[2], argv[1]);
-
-						STARTUPINFO si;
-						PROCESS_INFORMATION pi;
-						CreateProcessW(path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
-					}
-
-					HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, child_pid);
+					HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, suspended_pid);
 					NtResumeProcess(process);
 
 					printf("- %ul\n", buffer[i]);
