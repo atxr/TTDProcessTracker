@@ -7,8 +7,9 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 	UNREFERENCED_PARAMETER(RegistryPath);
 
 	InitializeListHead(&g_Globals.SuspendedHead);
+	InitializeListHead(&g_Globals.TrackedHead);
 	g_Globals.SuspendedCount = 0;
-	g_Globals.TrackedPid = 0;
+	g_Globals.TrackedCount = 0;
 	g_Globals.Mutex.Init();
 
 	DriverObject->DriverUnload = TTDProcessTrackerUnload;
@@ -51,6 +52,11 @@ void TTDProcessTrackerUnload(_In_ PDRIVER_OBJECT DriverObject) {
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
 	while (!IsListEmpty(&g_Globals.SuspendedHead)) {
 		auto entry = RemoveHeadList(&g_Globals.SuspendedHead);
+		ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
+	}
+
+	while (!IsListEmpty(&g_Globals.TrackedHead)) {
+		auto entry = RemoveHeadList(&g_Globals.TrackedHead);
 		ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
 	}
 
@@ -99,15 +105,34 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 		}
 
 		// TODO VALID PID TEST HERE
-		AutoLock<FastMutex> lock(g_Globals.Mutex);
-		g_Globals.TrackedPid = pid_data->pid;
-		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", g_Globals.TrackedPid));
+
+		// Push the process id to the tracked pid list
+		auto trackedEntry = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
+		if (!trackedEntry) {
+			KdPrint(("TTDProcessTrackerDeviceControl: Failed to allocate memory for trackedEntry\n"));
+			status = STATUS_INSUFFICIENT_RESOURCES;
+			break;
+		}
+
+		trackedEntry->Data = pid_data->pid;
+		status = PushItem(&g_Globals.TrackedHead, &trackedEntry->Entry);
+		if (!NT_SUCCESS(status)) {
+			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", trackedEntry->Data));
+			break;
+		}
+
+		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", trackedEntry->Data));
 		break;
 	}
 
 	case IOCTL_TTDPROCESSTRACKER_STOP: {
 		AutoLock<FastMutex> lock(g_Globals.Mutex);
-		g_Globals.TrackedPid = 0;
+
+		while (!IsListEmpty(&g_Globals.TrackedHead)) {
+			auto entry = RemoveHeadList(&g_Globals.TrackedHead);
+			ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
+		}
+
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP\n"));
 		break;
 	}
@@ -175,53 +200,63 @@ void CreateProcessCallback(
 	_Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo)
 {
 	// If we are not tracking a process, or if the process exits just return
-	if (g_Globals.TrackedPid == 0 || CreateInfo == nullptr) {
+	if (IsListEmpty(&g_Globals.TrackedHead) || CreateInfo == nullptr) {
 		return;
 	}
 
 	// If the process pid matches the one we are tracking
-	if (HandleToUlong(CreateInfo->ParentProcessId) == g_Globals.TrackedPid) {
-		KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
-		NTSTATUS status;
+	PLIST_ENTRY TrackedEntry = &g_Globals.TrackedHead;
+	for (unsigned int i = 0; i < g_Globals.TrackedCount; i++) {
+		auto TrackedItem = CONTAINING_RECORD(TrackedEntry, FullItem<ULONG>, Entry);
 
-		// Suspend the process
-		typedef NTSTATUS(*PSSUSPENDPROCESS)(PEPROCESS p);
-		UNICODE_STRING temp = RTL_CONSTANT_STRING(L"PsSuspendProcess");
-		PSSUSPENDPROCESS PsSuspendProcess = (PSSUSPENDPROCESS)MmGetSystemRoutineAddress(&temp);
-		status = PsSuspendProcess(Process);
-		if (!NT_SUCCESS(status)) {
-			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
-			return;
+		if (HandleToUlong(CreateInfo->ParentProcessId) == TrackedItem->Data) {
+			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
+			NTSTATUS status;
+
+			// Suspend the process
+			typedef NTSTATUS(*PSSUSPENDPROCESS)(PEPROCESS p);
+			UNICODE_STRING temp = RTL_CONSTANT_STRING(L"PsSuspendProcess");
+			PSSUSPENDPROCESS PsSuspendProcess = (PSSUSPENDPROCESS)MmGetSystemRoutineAddress(&temp);
+			status = PsSuspendProcess(Process);
+			if (!NT_SUCCESS(status)) {
+				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", TrackedItem->Data));
+				return;
+			}
+
+			// Push the process id to the notification list
+			auto suspendedInfo = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
+			if (!suspendedInfo) {
+				KdPrint(("CreateProcessCallback: Failed to allocate memory for suspendedInfo\n"));
+				return;
+			}
+
+			suspendedInfo->Data = HandleToUlong(ProcessId);
+			status = PushItem(&g_Globals.SuspendedHead, &suspendedInfo->Entry);
+			if (!NT_SUCCESS(status)) {
+				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", TrackedItem->Data));
+				return;
+			}
+
+			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
+			break;
 		}
 
-		// Push the process id to the notification list
-		auto suspendedInfo = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
-		if (!suspendedInfo) {
-			KdPrint(("CreateProcessCallback: Failed to allocate memory for suspendedInfo\n"));
-			return;
+		else {
+			TrackedEntry = TrackedEntry->Flink;
 		}
-
-		suspendedInfo->Data = HandleToUlong(ProcessId);
-		status = PushItem(&suspendedInfo->Entry);
-		if (!NT_SUCCESS(status)) {
-			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", g_Globals.TrackedPid));
-			return;
-		}
-
-		KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 	}
 
 	return;
 }
 
-NTSTATUS PushItem(LIST_ENTRY* Entry) {
+NTSTATUS PushItem(PLIST_ENTRY ListHead, PLIST_ENTRY Entry) {
 	if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
 		KdPrint(("TTDPROCESSTRACKER PushItem: Suspended PIDs list is full\n"));
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
 	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	InsertTailList(&g_Globals.SuspendedHead, Entry);
+	InsertTailList(ListHead, Entry);
 	g_Globals.SuspendedCount++;
 	return STATUS_SUCCESS;
 }

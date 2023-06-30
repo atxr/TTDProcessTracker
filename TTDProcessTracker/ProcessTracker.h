@@ -11,9 +11,12 @@ struct FullItem {
 };
 
 struct Globals {
-	ULONG TrackedPid;
+	LIST_ENTRY TrackedHead;
+	unsigned int TrackedCount;
+
 	LIST_ENTRY SuspendedHead;
 	unsigned int SuspendedCount;
+
 	FastMutex Mutex;
 };
 
@@ -22,7 +25,7 @@ NTSTATUS TTDProcessTrackerCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
 NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 NTSTATUS TTDProcessTrackerRead(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 
-NTSTATUS PushItem(LIST_ENTRY* Entry);
+NTSTATUS PushItem(PLIST_ENTRY ListHead, PLIST_ENTRY Entry);
 void CreateProcessCallback(
 	_Inout_ PEPROCESS Process,
 	_In_ HANDLE ProcessId,
