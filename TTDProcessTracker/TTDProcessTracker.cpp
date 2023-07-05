@@ -1,6 +1,12 @@
 #include "TTDProcessTracker.h"
 #include "ProcessTracker.h"
 
+// Declare undocumented functions
+typedef NTSTATUS(*PS_SUSPEND_PROCESS)(PEPROCESS p);
+PS_SUSPEND_PROCESS gPsSuspendProcess = nullptr;
+typedef PCHAR(*GET_PROCESS_IMAGE_NAME) (PEPROCESS Process);
+GET_PROCESS_IMAGE_NAME gGetProcessImageFileName = nullptr;
+
 Globals g_Globals;
 
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath) {
@@ -41,6 +47,26 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 	status = PsSetCreateProcessNotifyRoutineEx(CreateProcessCallback, FALSE);
 	if (!NT_SUCCESS(status)) {
 		KdPrint(("TTDProcessTracker DriverEntry: Failed to register CreateProcessCallback (0x%08X)\n", status));
+	}
+
+	UNICODE_STRING sPsSuspendProcess = RTL_CONSTANT_STRING(L"PsSuspendProcess");
+	gPsSuspendProcess = (PS_SUSPEND_PROCESS)MmGetSystemRoutineAddress(&sPsSuspendProcess);
+	if (gPsSuspendProcess == nullptr) {
+		KdPrint(("Failed to compute address of gPsSuspendProcess"));
+		IoDeleteSymbolicLink(&symName);
+		IoDeleteDevice(DeviceObject);
+		return STATUS_NOT_FOUND;
+	}
+
+	UNICODE_STRING sPsGetProcessImageFileName = RTL_CONSTANT_STRING(
+		L"PsGetProcessImageFileName");
+	gGetProcessImageFileName = (GET_PROCESS_IMAGE_NAME)
+		MmGetSystemRoutineAddress(&sPsGetProcessImageFileName);
+	if (gGetProcessImageFileName == nullptr) {
+		KdPrint(("Failed to compute address of gGetProcessImageFileName"));
+		IoDeleteSymbolicLink(&symName);
+		IoDeleteDevice(DeviceObject);
+		return STATUS_NOT_FOUND;
 	}
 
 	KdPrint(("PriorityBooster loaded\n"));
@@ -214,16 +240,22 @@ void CreateProcessCallback(
 		entry = entry->Flink;
 		const ULONG tracked_pid = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry)->Data;
 
-		if (HandleToUlong(CreateInfo->ParentProcessId) == TrackedItem->Data) {
 		if (HandleToUlong(CreateInfo->ParentProcessId) == tracked_pid) {
 			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			NTSTATUS status;
 
+			// Test if TTD.exe in the process name
+			PCHAR pImageName = gGetProcessImageFileName(PsGetCurrentProcess());
+			if (NULL != pImageName)
+			{
+				KdPrint(("New process %s", pImageName));
+				if (strstr(pImageName, "TTD.exe")) {
+					return;
+				}
+			}
+
 			// Suspend the process
-			typedef NTSTATUS(*PSSUSPENDPROCESS)(PEPROCESS p);
-			UNICODE_STRING temp = RTL_CONSTANT_STRING(L"PsSuspendProcess");
-			PSSUSPENDPROCESS PsSuspendProcess = (PSSUSPENDPROCESS)MmGetSystemRoutineAddress(&temp);
-			status = PsSuspendProcess(Process);
+			status = gPsSuspendProcess(Process);
 			if (!NT_SUCCESS(status)) {
 				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", tracked_pid));
 				return;
@@ -253,4 +285,3 @@ void CreateProcessCallback(
 
 	return;
 }
-
