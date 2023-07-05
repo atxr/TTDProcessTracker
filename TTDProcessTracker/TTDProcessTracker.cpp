@@ -244,23 +244,6 @@ void CreateProcessCallback(
 			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			NTSTATUS status;
 
-			// Test if TTD.exe in the process name
-			PCHAR pImageName = gGetProcessImageFileName(PsGetCurrentProcess());
-			if (NULL != pImageName)
-			{
-				KdPrint(("New process %s", pImageName));
-				if (strstr(pImageName, "TTD.exe")) {
-					return;
-				}
-			}
-
-			// Suspend the process
-			status = gPsSuspendProcess(Process);
-			if (!NT_SUCCESS(status)) {
-				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", tracked_pid));
-				return;
-			}
-
 			// Push the process id to the notification list
 			auto suspendedInfo = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
 			if (!suspendedInfo) {
@@ -277,6 +260,26 @@ void CreateProcessCallback(
 			AutoLock<FastMutex> lock(g_Globals.Mutex);
 			InsertTailList(&g_Globals.SuspendedHead, &suspendedInfo->Entry);
 			g_Globals.SuspendedCount += 1;
+
+			// Test if TTD.exe in the process name
+			PCHAR pImageName = gGetProcessImageFileName(Process);
+			if (NULL != pImageName)
+			{
+				KdPrint(("CreateProcessCallback: Add %s (%d) to list of tracked pids", pImageName, HandleToLong(ProcessId)));
+				if (strstr(pImageName, "TTD.exe")) {
+					return;
+				}
+			}
+			else {
+				KdPrint(("CreateProcessCallback: Cannot retreive the name of the process %d. Adding it to tracked pids.", HandleToLong(ProcessId)));
+			}
+
+			// Suspend the process if the process isn't TTD.exe
+			status = gPsSuspendProcess(Process);
+			if (!NT_SUCCESS(status)) {
+				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", tracked_pid));
+				return;
+			}
 
 			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			break;
