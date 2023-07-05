@@ -32,7 +32,20 @@ BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
 	}
 }
 
-int wmain(int argc, const wchar_t* argv[])
+int GetCurrentPath(char* out) {
+	char buffer[MAX_PATH] = { 0 };
+	GetModuleFileNameA(NULL, buffer, MAX_PATH);
+	char* end = strrchr(buffer, '\\');
+	if (!end) {
+		return 1;
+	}
+
+	*end = 0;
+	memcpy(out, buffer, end - buffer + 1);
+	return 0;
+}
+
+int main(int argc, const char* argv[])
 {
 	if (argc != 3) {
 		printf("Usage: tracker <program to trace> <out directory>\n");
@@ -62,7 +75,30 @@ int wmain(int argc, const wchar_t* argv[])
 		return Error("Failed to get NtResumeProcess address");
 	}
 
+	char path[MAX_PATH];
+	if (GetCurrentPath((char*)path) == 1) {
+		fprintf(stderr, "Failed to retreive current path\n");
+		return 1;
+	}
+	char ttd_path[MAX_PATH] = { 0 };
+	snprintf(ttd_path, MAX_PATH, "%s\\TTD.exe", path);
+	const char ttd_launch_format[] = "TTD.exe -out %s -launch %s";
+	const char ttd_attach_format[] = "TTD.exe -out %s -attach %d -onInitComplete TtdInitCompleteEvent1480";
+
 	ULONG buffer[64];
+	char cmd[MAX_LENGTH];
+	SHORT copied;
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	ZeroMemory(&si, sizeof(si));
+	ZeroMemory(&pi, sizeof(pi));
+
+	printf("ttdpath=%s\n", ttd_path);
+	copied = snprintf(cmd, MAX_LENGTH, ttd_launch_format, argv[2], argv[1]);
+	if (!CreateProcessA(ttd_path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+		return Error("Failed to start TTD process");
+	}
+
 	if (SetConsoleCtrlHandler(CtrlHandler, TRUE))
 	{
 		printf("Press CTRL+C to stop tracking\n");
@@ -77,16 +113,25 @@ int wmain(int argc, const wchar_t* argv[])
 
 			if (returned != 0) {
 				printf("Driver suspended %d child process(es) with PID:\n", returned);
-				for (int i = 0; i < returned; i++) {
-					ULONG suspended_pid = buffer[i];
-					const wchar_t path[] = L"C:\\Program Files\\WindowsApps\\Microsoft.WinDbg_1.2306.12001.0_x64__8wekyb3d8bbwe\\amd64\\ttd\\TTD.exe";
-					wchar_t cmd[MAX_LENGTH];
-					const wchar_t* arg[2] = { argv[2], argv[1] };
-					SHORT copied = _snwprintf_s(cmd, MAX_LENGTH, L"TTD.exe -out %s -attach %s -onInitComplete TtdInitCompleteEvent1480 1>path/to/temp/file 2>&1", argv[2], argv[1]);
 
-					STARTUPINFO si;
-					PROCESS_INFORMATION pi;
-					CreateProcessW(path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+				// First time process suspend ie original TTD.exe
+				// Stop tracking current_pid to avoid tracking the CreateProcess calls
+				if (count == 0) {
+					BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_STOP, nullptr, 0, nullptr, 0, &returned, nullptr);
+					if (!success) {
+						return Error("Stop tracker failed");
+					}
+					count++;
+					continue;  // drop any other pid in the buffer
+				}
+
+				for (unsigned int i = 0; i < returned; i++) {
+					ULONG suspended_pid = buffer[i];
+					copied = snprintf(cmd, MAX_LENGTH, ttd_attach_format, argv[2], suspended_pid);
+
+					if (!CreateProcessA(ttd_path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+						return Error("Failed to start TTD process");
+					}
 
 					HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, suspended_pid);
 					NtResumeProcess(process);
