@@ -115,11 +115,14 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 		}
 
 		trackedEntry->Data = pid_data->pid;
-		status = PushItem(&g_Globals.TrackedHead, &trackedEntry->Entry);
-		if (!NT_SUCCESS(status)) {
-			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", trackedEntry->Data));
+		if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
+			KdPrint(("TTDPROCESSTRACKER DeviceControl: Tracked PIDs list is full\n"));
 			break;
 		}
+
+		AutoLock<FastMutex> lock(g_Globals.Mutex);
+		InsertTailList(&g_Globals.TrackedHead, &trackedEntry->Entry);
+		g_Globals.TrackedCount += 1;
 
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", trackedEntry->Data));
 		break;
@@ -204,12 +207,15 @@ void CreateProcessCallback(
 		return;
 	}
 
+
 	// If the process pid matches the one we are tracking
-	PLIST_ENTRY TrackedEntry = &g_Globals.TrackedHead;
-	for (unsigned int i = 0; i < g_Globals.TrackedCount; i++) {
-		auto TrackedItem = CONTAINING_RECORD(TrackedEntry, FullItem<ULONG>, Entry);
+	const LIST_ENTRY* entry = &g_Globals.TrackedHead;
+	while (entry->Flink != &g_Globals.TrackedHead) {
+		entry = entry->Flink;
+		const ULONG tracked_pid = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry)->Data;
 
 		if (HandleToUlong(CreateInfo->ParentProcessId) == TrackedItem->Data) {
+		if (HandleToUlong(CreateInfo->ParentProcessId) == tracked_pid) {
 			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			NTSTATUS status;
 
@@ -219,7 +225,7 @@ void CreateProcessCallback(
 			PSSUSPENDPROCESS PsSuspendProcess = (PSSUSPENDPROCESS)MmGetSystemRoutineAddress(&temp);
 			status = PsSuspendProcess(Process);
 			if (!NT_SUCCESS(status)) {
-				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", TrackedItem->Data));
+				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", tracked_pid));
 				return;
 			}
 
@@ -231,32 +237,20 @@ void CreateProcessCallback(
 			}
 
 			suspendedInfo->Data = HandleToUlong(ProcessId);
-			status = PushItem(&g_Globals.SuspendedHead, &suspendedInfo->Entry);
-			if (!NT_SUCCESS(status)) {
-				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", TrackedItem->Data));
+			if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
+				KdPrint(("TTDPROCESSTRACKER Callback: Suspended PIDs list is full\n"));
 				return;
 			}
 
+			AutoLock<FastMutex> lock(g_Globals.Mutex);
+			InsertTailList(&g_Globals.SuspendedHead, &suspendedInfo->Entry);
+			g_Globals.SuspendedCount += 1;
+
 			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			break;
-		}
-
-		else {
-			TrackedEntry = TrackedEntry->Flink;
 		}
 	}
 
 	return;
 }
 
-NTSTATUS PushItem(PLIST_ENTRY ListHead, PLIST_ENTRY Entry) {
-	if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
-		KdPrint(("TTDPROCESSTRACKER PushItem: Suspended PIDs list is full\n"));
-		return STATUS_INSUFFICIENT_RESOURCES;
-	}
-
-	AutoLock<FastMutex> lock(g_Globals.Mutex);
-	InsertTailList(ListHead, Entry);
-	g_Globals.SuspendedCount++;
-	return STATUS_SUCCESS;
-}
