@@ -2,8 +2,6 @@
 #include <ntifs.h>
 #include "FastMutex.h"
 
-#define MAX_SUSPENDED_PIDS 100
-
 template<typename T>
 struct FullItem {
 	LIST_ENTRY Entry;
@@ -12,11 +10,7 @@ struct FullItem {
 
 struct Globals {
 	LIST_ENTRY TrackedHead;
-	unsigned int TrackedCount;
-
 	LIST_ENTRY SuspendedHead;
-	unsigned int SuspendedCount;
-
 	FastMutex Mutex;
 };
 

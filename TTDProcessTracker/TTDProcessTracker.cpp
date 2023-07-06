@@ -14,8 +14,6 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 
 	InitializeListHead(&g_Globals.SuspendedHead);
 	InitializeListHead(&g_Globals.TrackedHead);
-	g_Globals.SuspendedCount = 0;
-	g_Globals.TrackedCount = 0;
 	g_Globals.Mutex.Init();
 
 	DriverObject->DriverUnload = TTDProcessTrackerUnload;
@@ -139,16 +137,10 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 			status = STATUS_INSUFFICIENT_RESOURCES;
 			break;
 		}
-
 		trackedEntry->Data = pid_data->pid;
-		if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
-			KdPrint(("TTDPROCESSTRACKER DeviceControl: Tracked PIDs list is full\n"));
-			break;
-		}
 
 		AutoLock<FastMutex> lock(g_Globals.Mutex);
 		InsertTailList(&g_Globals.TrackedHead, &trackedEntry->Entry);
-		g_Globals.TrackedCount += 1;
 
 		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", trackedEntry->Data));
 		break;
@@ -206,7 +198,6 @@ NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 				break;
 			}
 
-			g_Globals.SuspendedCount--;
 			::memcpy(buffer, &item->Data, size);
 			len -= size;
 			buffer += size;
@@ -250,16 +241,10 @@ void CreateProcessCallback(
 				KdPrint(("CreateProcessCallback: Failed to allocate memory for suspendedInfo\n"));
 				return;
 			}
-
 			suspendedInfo->Data = HandleToUlong(ProcessId);
-			if (g_Globals.SuspendedCount >= MAX_SUSPENDED_PIDS) {
-				KdPrint(("TTDPROCESSTRACKER Callback: Suspended PIDs list is full\n"));
-				return;
-			}
 
 			AutoLock<FastMutex> lock(g_Globals.Mutex);
 			InsertTailList(&g_Globals.SuspendedHead, &suspendedInfo->Entry);
-			g_Globals.SuspendedCount += 1;
 
 			// Test if TTD.exe in the process name
 			PCHAR pImageName = gGetProcessImageFileName(Process);
