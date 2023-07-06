@@ -18,7 +18,7 @@ BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
 	case CTRL_C_EVENT:
 	{
 		DWORD returned;
-		printf("CtrlHandler\n");
+		printf("Stopping tracker...\n");
 		BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_STOP, nullptr, 0, nullptr, 0, &returned, nullptr);
 		if (!success) {
 			return Error("Stop tracker failed");
@@ -59,8 +59,8 @@ int main(int argc, const char* argv[])
 		return Error("Failed to open device");
 
 	DWORD tmp;
-	PID_DATA data = { current_pid };
-	BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_INIT, &data, sizeof(data), nullptr, 0, &tmp, nullptr);
+	PID_DATA current_pid_data = { current_pid };
+	BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_INIT, &current_pid_data, sizeof(current_pid_data), nullptr, 0, &tmp, nullptr);
 	if (!success) {
 		return Error("Failed to init tracker");
 	}
@@ -106,7 +106,7 @@ int main(int argc, const char* argv[])
 		for (;;) {
 			// Check if a child process has been caught by the driver
 			DWORD returned;
-			if (!::ReadFile(hDevice, buffer, sizeof(buffer), &returned, nullptr))
+			if (!ReadFile(hDevice, buffer, sizeof(buffer), &returned, nullptr))
 				return Error("Failed to read from device");
 
 			returned /= sizeof(ULONG);
@@ -114,34 +114,38 @@ int main(int argc, const char* argv[])
 			if (returned != 0) {
 				printf("Driver suspended %d child process(es) with PID:\n", returned);
 
-				// First time process suspend ie original TTD.exe
-				// Stop tracking current_pid to avoid tracking the CreateProcess calls
-				if (count == 0) {
-					BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_STOP, nullptr, 0, nullptr, 0, &returned, nullptr);
-					if (!success) {
-						return Error("Stop tracker failed");
-					}
-					count++;
-					continue;  // drop any other pid in the buffer
-				}
-
 				for (unsigned int i = 0; i < returned; i++) {
+					// First time process suspend ie original TTD.exe
+					// Stop tracking current_pid to avoid tracking the CreateProcess calls
+					if (count == 0) {
+						BOOL success = DeviceIoControl(hDevice, IOCTL_TTDPROCESSTRACKER_STOP, &current_pid_data, sizeof(current_pid_data), nullptr, 0, &returned, nullptr);
+						printf("- %ul (init)\n", buffer[0]);
+						if (!success) {
+							return Error("Stop tracker failed");
+						}
+						count++;
+						continue;
+					}
+
 					ULONG suspended_pid = buffer[i];
 					copied = snprintf(cmd, MAX_LENGTH, ttd_attach_format, argv[2], suspended_pid);
 
-					if (!CreateProcessA(ttd_path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+					STARTUPINFOA si1;
+					PROCESS_INFORMATION pi1;
+					ZeroMemory(&si, sizeof(si1));
+					ZeroMemory(&pi1, sizeof(pi1));
+					if (!CreateProcessA(ttd_path, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si1, &pi1)) {
 						return Error("Failed to start TTD process");
 					}
 
 					HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, suspended_pid);
 					NtResumeProcess(process);
 
-					printf("- %ul\n", buffer[i]);
 					count++;
 				}
 			}
 
-			::Sleep(200);
+			Sleep(200);
 		}
 	}
 
