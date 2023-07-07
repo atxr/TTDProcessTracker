@@ -116,7 +116,6 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 	switch (stack->Parameters.DeviceIoControl.IoControlCode) {
 	case IOCTL_TTDPROCESSTRACKER_INIT:
 	{
-		// FIXME right size?
 		if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(PID_DATA)) {
 			status = STATUS_BUFFER_TOO_SMALL;
 			break;
@@ -130,31 +129,43 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 
 		// TODO VALID PID TEST HERE
 
-		// Push the process id to the tracked pid list
-		auto trackedEntry = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
-		if (!trackedEntry) {
-			KdPrint(("TTDProcessTrackerDeviceControl: Failed to allocate memory for trackedEntry\n"));
-			status = STATUS_INSUFFICIENT_RESOURCES;
-			break;
-		}
-		trackedEntry->Data = pid_data->pid;
-
-		AutoLock<FastMutex> lock(g_Globals.Mutex);
-		InsertTailList(&g_Globals.TrackedHead, &trackedEntry->Entry);
-
-		KdPrint(("IOCTL_TTDPROCESSTRACKER_INIT with PID: %d\n", trackedEntry->Data));
+		status = AddTrackedPid(pid_data->pid);
 		break;
 	}
 
 	case IOCTL_TTDPROCESSTRACKER_STOP: {
-		AutoLock<FastMutex> lock(g_Globals.Mutex);
+		// If no parameters, clear the tracked pid list
+		/*
+		if (stack->Parameters.DeviceIoControl.InputBufferLength == 0) {
+			AutoLock<FastMutex> lock(g_Globals.Mutex);
+			while (!IsListEmpty(&g_Globals.TrackedHead)) {
+				auto entry = RemoveHeadList(&g_Globals.TrackedHead);
+				if (entry == nullptr) {
+					KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP fatal free"));
+					status = STATUS_FATAL_APP_EXIT;
+					break;
+				}
+				ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
+			}
 
-		while (!IsListEmpty(&g_Globals.TrackedHead)) {
-			auto entry = RemoveHeadList(&g_Globals.TrackedHead);
-			ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
+			KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP: Cleared tracked pid list\n"));
+			break;
+		}
+		*/
+
+		// Else, retreive the pid to remove
+		if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(PID_DATA)) {
+			status = STATUS_BUFFER_TOO_SMALL;
+			break;
 		}
 
-		KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP\n"));
+		PID_DATA* pid_data = (PID_DATA*)Irp->AssociatedIrp.SystemBuffer;
+		if (pid_data == nullptr) {
+			status = STATUS_INVALID_PARAMETER;
+			break;
+		}
+
+		status = RemoveTrackedPid(pid_data->pid);
 		break;
 	}
 
@@ -175,7 +186,7 @@ NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 	auto status = STATUS_SUCCESS;
 	auto stack = IoGetCurrentIrpStackLocation(Irp);
-	auto len = stack->Parameters.Read.Length;
+	auto len_buffer = stack->Parameters.Read.Length;
 	auto count = 0;
 	NT_ASSERT(Irp->MdlAddress);
 
@@ -184,22 +195,23 @@ NTSTATUS TTDProcessTrackerRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		status = STATUS_INSUFFICIENT_RESOURCES;
 	}
 	else {
+		AutoLock<FastMutex> lock(g_Globals.Mutex);
 		for (;;) {
 			if (IsListEmpty(&g_Globals.SuspendedHead))
 				break;
 
-			AutoLock<FastMutex> lock(g_Globals.Mutex);
+			KdPrint(("TTDProcessTrackerRead: data sent to userland\n"));
 			auto entry = RemoveHeadList(&g_Globals.SuspendedHead);
 			auto item = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry);
 			ULONG size = sizeof(ULONG);
-			if (len < size) {
+			if (len_buffer < size) {
+				KdPrint(("TTDProcessTrackerRead: data full with size of %u only for %u\n", len_buffer, size));
 				// Not enough room in the user's buffer.
 				InsertHeadList(&g_Globals.SuspendedHead, entry);
 				break;
 			}
-
-			::memcpy(buffer, &item->Data, size);
-			len -= size;
+			memcpy(buffer, &item->Data, size);
+			len_buffer -= size;
 			buffer += size;
 			count += size;
 
@@ -232,44 +244,109 @@ void CreateProcessCallback(
 		const ULONG tracked_pid = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry)->Data;
 
 		if (HandleToUlong(CreateInfo->ParentProcessId) == tracked_pid) {
-			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d created\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			NTSTATUS status;
+			bool track = true;
+			bool suspend = true;
 
-			// Push the process id to the notification list
-			auto suspendedInfo = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
-			if (!suspendedInfo) {
-				KdPrint(("CreateProcessCallback: Failed to allocate memory for suspendedInfo\n"));
+			// Test the process name
+			PEPROCESS ParentProcess = nullptr;
+			status = PsLookupProcessByProcessId(CreateInfo->ParentProcessId, &ParentProcess);
+			if (!NT_SUCCESS(status)) {
+				KdPrint(("CreateProcessCallback: Cannot lookup parent process\n"));
 				return;
 			}
-			suspendedInfo->Data = HandleToUlong(ProcessId);
+			PCHAR parent_process_name = gGetProcessImageFileName(ParentProcess);
+			PCHAR process_name = gGetProcessImageFileName(Process);
 
-			AutoLock<FastMutex> lock(g_Globals.Mutex);
-			InsertTailList(&g_Globals.SuspendedHead, &suspendedInfo->Entry);
-
-			// Test if TTD.exe in the process name
-			PCHAR pImageName = gGetProcessImageFileName(Process);
-			if (NULL != pImageName)
+			if (NULL != process_name && NULL != parent_process_name)
 			{
-				KdPrint(("CreateProcessCallback: Add %s (%d) to list of tracked pids", pImageName, HandleToLong(ProcessId)));
-				if (strstr(pImageName, "TTD.exe")) {
-					return;
+				if (strstr(process_name, "TTD.exe")) {
+					suspend = false;
+				}
+
+				// Ignore ttd injection by TTD.exe
+				else if (strstr(process_name, "ttdinject.exe") && strstr(parent_process_name, "TTD.exe")) {
+					suspend = false;
+					track = false;
+					KdPrint(("Nothing to do with %u", HandleToUlong(ProcessId)));
 				}
 			}
 			else {
 				KdPrint(("CreateProcessCallback: Cannot retreive the name of the process %d. Adding it to tracked pids.", HandleToLong(ProcessId)));
-			}
-
-			// Suspend the process if the process isn't TTD.exe
-			status = gPsSuspendProcess(Process);
-			if (!NT_SUCCESS(status)) {
-				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", tracked_pid));
 				return;
 			}
 
-			KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
-			break;
+			if (track)
+			{
+				KdPrint(("Track %u", HandleToULong(ProcessId)));
+				// Push the process id to the notification list
+				status = AddTrackedPid(HandleToUlong(ProcessId));
+				if (!NT_SUCCESS(status)) {
+					return;
+				}
+			}
+
+			if (suspend)
+			{
+				// Suspend the process if the process isn't TTD.exe
+				KdPrint(("Suspend %u", HandleToULong(ProcessId)));
+				status = gPsSuspendProcess(Process);
+				if (!NT_SUCCESS(status)) {
+					KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", HandleToLong(ProcessId)));
+					return;
+				}
+
+				auto suspendedItem = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
+				if (!suspendedItem) {
+					KdPrint(("TTDPROCESSTRACKER AddTrackedPid: Failed to allocate memory for new entry\n"));
+					return;
+				}
+				suspendedItem->Data = HandleToLong(ProcessId);
+
+				AutoLock<FastMutex> lock(g_Globals.Mutex);
+				InsertTailList(&g_Globals.SuspendedHead, &suspendedItem->Entry);
+
+				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
+			}
+
+			return;
 		}
 	}
 
 	return;
+}
+
+NTSTATUS AddTrackedPid(ULONG pid) {
+	auto trackedEntry = (FullItem<ULONG>*)ExAllocatePool2(POOL_FLAG_PAGED, sizeof(FullItem<ULONG>), 'TTD');
+	if (!trackedEntry) {
+		KdPrint(("TTDPROCESSTRACKER AddTrackedPid: Failed to allocate memory for new entry\n"));
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+	trackedEntry->Data = pid;
+
+	AutoLock<FastMutex> lock(g_Globals.Mutex);
+	InsertTailList(&g_Globals.TrackedHead, &trackedEntry->Entry);
+
+	KdPrint(("TTDPROCESSTRACKER AddTrackedPid: New tracked PID: %d\n", trackedEntry->Data));
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS RemoveTrackedPid(ULONG pid) {
+
+	PLIST_ENTRY entry = &g_Globals.TrackedHead;
+	while (entry->Flink != &g_Globals.TrackedHead) {
+		entry = entry->Flink;
+		auto item = CONTAINING_RECORD(entry, FullItem<ULONG>, Entry);
+		if (item->Data == pid)
+		{
+			AutoLock<FastMutex> lock(g_Globals.Mutex);
+			RemoveEntryList(entry);
+			ExFreePool(item);
+			KdPrint(("TTDPROCESSTRACKER RemoveTrackedPid: pid %u removed from tracked list\n", pid));
+			return STATUS_SUCCESS;
+		}
+	}
+
+	KdPrint(("TTDPROCESSTRACKER RemoveTrackedPid: Did not found pid %u\n", pid));
+	return STATUS_NOT_FOUND;
 }

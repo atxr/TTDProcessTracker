@@ -19,6 +19,8 @@ NTSTATUS TTDProcessTrackerCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
 NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 NTSTATUS TTDProcessTrackerRead(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
 
+NTSTATUS AddTrackedPid(ULONG pid);
+NTSTATUS RemoveTrackedPid(ULONG pid);
 void CreateProcessCallback(
 	_Inout_ PEPROCESS Process,
 	_In_ HANDLE ProcessId,
