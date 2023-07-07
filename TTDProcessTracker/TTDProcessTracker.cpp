@@ -135,23 +135,16 @@ NTSTATUS TTDProcessTrackerDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ P
 
 	case IOCTL_TTDPROCESSTRACKER_STOP: {
 		// If no parameters, clear the tracked pid list
-		/*
 		if (stack->Parameters.DeviceIoControl.InputBufferLength == 0) {
 			AutoLock<FastMutex> lock(g_Globals.Mutex);
 			while (!IsListEmpty(&g_Globals.TrackedHead)) {
 				auto entry = RemoveHeadList(&g_Globals.TrackedHead);
-				if (entry == nullptr) {
-					KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP fatal free"));
-					status = STATUS_FATAL_APP_EXIT;
-					break;
-				}
 				ExFreePool(CONTAINING_RECORD(entry, FullItem<ULONG>, Entry));
 			}
 
 			KdPrint(("IOCTL_TTDPROCESSTRACKER_STOP: Cleared tracked pid list\n"));
 			break;
 		}
-		*/
 
 		// Else, retreive the pid to remove
 		if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(PID_DATA)) {
