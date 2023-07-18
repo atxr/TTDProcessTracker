@@ -271,7 +271,6 @@ void CreateProcessCallback(
 
 			if (track)
 			{
-				KdPrint(("Track %u", HandleToULong(ProcessId)));
 				// Push the process id to the notification list
 				status = AddTrackedPid(HandleToUlong(ProcessId));
 				if (!NT_SUCCESS(status)) {
@@ -282,7 +281,6 @@ void CreateProcessCallback(
 			if (suspend)
 			{
 				// Suspend the process if the process isn't TTD.exe
-				KdPrint(("Suspend %u", HandleToULong(ProcessId)));
 				status = gPsSuspendProcess(Process);
 				if (!NT_SUCCESS(status)) {
 					KdPrint(("TTDPROCESSTRACKER CreateProcessCallback failed to suspend process with PID: %d\n", HandleToLong(ProcessId)));
@@ -299,7 +297,7 @@ void CreateProcessCallback(
 				AutoLock<FastMutex> lock(g_Globals.Mutex);
 				InsertTailList(&g_Globals.SuspendedHead, &suspendedItem->Entry);
 
-				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d with parent %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
+				KdPrint(("TTDPROCESSTRACKER CreateProcessCallback: Process %d suspended\n", HandleToUlong(ProcessId), HandleToUlong(CreateInfo->ParentProcessId)));
 			}
 
 			return;
