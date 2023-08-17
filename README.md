@@ -14,15 +14,7 @@
 ![scheme](assets/scheme.png)
 
 ## Installation and usage
-
-> ⚠️ **Note:**
->
-> This project relies on a Windows driver and should be used inside a Virtual Machine, otherwise you might experience some BSOD 🟦
-
-First, build the project with visual studio compiler.
-Then, use the script to start the driver.
-Launch the tracker with the name of the program to track.
-Finally, stop the driver.
+Two scripts have been added to the repo to start and stop the TTDProcessTracker driver.
 
 ```powershell
 .\startpt.cmd
