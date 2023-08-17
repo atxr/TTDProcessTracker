@@ -15,6 +15,7 @@
 
 ## Installation and usage
 Two scripts have been added to the repo to start and stop the TTDProcessTracker driver.
+Run the following commands in the same folders as `Tracker.exe` and `TTDProcessTracker.sys` 
 
 ```powershell
 .\startpt.cmd
